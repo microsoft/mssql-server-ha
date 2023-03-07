@@ -1,0 +1,120 @@
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="ag" version="1.0">
+  <version>1.0</version>
+  <longdesc lang="en">
+    Stateful resource agent for a SQL Server Availability Group.
+  </longdesc>
+  <shortdesc lang="en">Availability Group resource agent.</shortdesc>
+  <parameters>
+    <parameter name="ag_name" unique="1" required="1">
+      <longdesc lang="en">
+        The name of the Availability Group that this resource will represent.
+      </longdesc>
+      <shortdesc lang="en">Name of the AG.</shortdesc>
+      <content type="string"/>
+    </parameter>
+    <parameter name="connection_timeout" unique="0" required="0">
+      <longdesc lang="en">
+        Login and query execution timeout in seconds. Default: 30
+
+        The value of this parameter should be higher than the longest time it takes for any database in the AG to complete recovery.
+        For example, if a database in the AG may take up to about 2 minutes to recover, this parameter should be set to 120 or higher.
+      </longdesc>
+      <shortdesc lang="en">Login and query execution timeout.</shortdesc>
+      <content type="integer" default="30"/>
+    </parameter>
+    <parameter name="disable_primary_on_quorum_timeout_after" unique="0" required="0">
+      <longdesc lang="en">
+        If the primary is unable to commit AG configuration updates with a sufficient number of other SYNCHRONOUS_COMMIT and CONFIGURATION_ONLY replicas in the AG, the agent will disable the primary by not renewing the primary's write lease. If the time in seconds specified by this value has passed since the primary was unable to commit a configuration update, the agent will stop renewing the primary's write lease, causing all pending transactions to fail and the DB to become inaccessible. Default: 60
+      </longdesc>
+      <shortdesc lang="en">How long the primary can block on committing a configuration update before the agent stops renewing its write lease.</shortdesc>
+      <content type="integer" default="60"/>
+    </parameter>
+    <parameter name="health_check_retries" unique="0" required="0">
+      <longdesc lang="en">This parameter is unused and only kept for backward-compatibility. Set connection_timeout instead.</longdesc>
+      <shortdesc lang="en">Unused.</shortdesc>
+      <content type="integer" default=""/>
+    </parameter>
+    <parameter name="monitor_policy" unique="0" required="0">
+      <longdesc lang="en">
+        Monitoring policy options are:
+
+        1) SERVER_UNRESPONSIVE_OR_DOWN: Fail if the SQL Server instance is unresponsive (unable to establish a connection) or down (the process is not running)
+        3) SERVER_CRITICAL_ERROR: Fail if sp_server_diagnostics detects a critical system error
+        4) SERVER_MODERATE_ERROR: Fail if sp_server_diagnostics detects a critical system or resource error
+        5) SERVER_ANY_QUALIFIED_ERROR: Fail if sp_server_diagnostics detects any qualified error
+      </longdesc>
+      <shortdesc lang="en">Monitoring policy</shortdesc>
+      <content type="integer" default="3"/>
+    </parameter>
+    <parameter name="monitor_timeout" unique="0" required="0">
+      <longdesc lang="en">This parameter is deprecated. Set connection_timeout instead.</longdesc>
+      <shortdesc lang="en">Deprecated.</shortdesc>
+      <content type="integer" default=""/>
+    </parameter>
+    <parameter name="monitoring_credentials_file" unique="0" required="0">
+      <longdesc lang="en">
+        Path to a file containing the credentials for a SQL Server user. The resource agent will login using these credentials to perform actions against the instance.
+
+        This file should contain two lines separated by LF. The first line should have the username, and the second line should have the password.
+      </longdesc>
+      <shortdesc lang="en">Path to a file containing the credentials for a SQL Server user.</shortdesc>
+      <content type="string" default="/var/opt/mssql/secrets/passwd"/>
+    </parameter>
+    <parameter name="online_databases_retries" unique="0" required="0">
+      <longdesc lang="en">
+        This parameter is unused. Set the timeouts of the start, monitor and promote actions instead.
+
+        This parameter used to control how long the resource agent waited for all databases of an AG to be ONLINE on a primary replica with DB_FAILOVER = ON.
+
+        The resource agent has been changed to wait indefinitely, until the corresponding action (start / monitor / promote) times out, so this parameter is no longer used.
+      </longdesc>
+      <shortdesc lang="en">Unused.</shortdesc>
+      <content type="integer" default=""/>
+    </parameter>
+    <parameter name="port" unique="0" required="0">
+      <longdesc lang="en">The TSQL port that the SQL Server instance listens on.</longdesc>
+      <shortdesc lang="en">TSQL port</shortdesc>
+      <content type="integer" default="1433"/>
+    </parameter>
+    <parameter name="primary_write_lease_duration" unique="0" required="0">
+      <longdesc lang="en">
+        If set, the agent will renew the primary's AG write lease to this value in seconds. Otherwise the agent will set it based on the monitor action's interval and timeout.
+
+        It is recommended to set this value greater than the sum of the monitor action's interval and timeout.
+      </longdesc>
+      <shortdesc lang="en">Primary write lease duration.</shortdesc>
+      <content type="integer" default=""/>
+    </parameter>
+    <parameter name="process_name" unique="0" required="0">
+      <longdesc lang="en">The name of the SQL Server process. Default: sqlservr</longdesc>
+      <shortdesc lang="en">The name of the SQL Server process.</shortdesc>
+      <content type="string" default="sqlservr"/>
+    </parameter>
+    <parameter name="required_copies_to_commit" unique="0" required="0">
+      <longdesc lang="en">This parameter is deprecated. Set required_synchronized_secondaries_to_commit instead.</longdesc>
+      <shortdesc lang="en">Deprecated.</shortdesc>
+      <content type="integer" default=""/>
+    </parameter>
+    <parameter name="required_synchronized_secondaries_to_commit" unique="0" required="0">
+      <longdesc lang="en">
+        If set, the agent will set REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT to this value. Otherwise the agent will calculate a value based on the number of SYNCHRONOUS_COMMIT replicas.
+      </longdesc>
+      <shortdesc lang="en">Override for the default REQUIRED_SYNCHRONIZED_SECONDARIES_TO_COMMIT value.</shortdesc>
+      <content type="integer" default=""/>
+    </parameter>
+  </parameters>
+  <actions>
+    <action name="start" timeout="60"/>
+    <action name="stop" timeout="10"/>
+    <action name="promote" timeout="60"/>
+    <action name="demote" timeout="10"/>
+    <action name="monitor" timeout="60" interval="10" depth="0"/>
+    <action name="monitor" timeout="60" interval="11" depth="0" role="Master"/>
+    <action name="monitor" timeout="60" interval="12" depth="0" role="Slave"/>
+    <action name="validate-all" timeout="20"/>
+    <action name="meta-data" timeout="5"/>
+    <action name="notify" timeout="60" />
+  </actions>
+</resource-agent>

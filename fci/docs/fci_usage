@@ -1,0 +1,3 @@
+usage: $0 {start|stop|monitor|validate-all|meta-data}
+
+Expects to have a fully populated OCF RA-compliant environment set.

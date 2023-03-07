@@ -1,0 +1,339 @@
+#!/bin/bash
+#
+# Copyright (C) Microsoft Corporation.
+#
+# Some simple functional tests for the resource agent.
+# Should only be run when nothing else will be starting or stopping SQL Server.
+# Any of the default values set in the resource agent can be overriden by exporting an env variable with the same name.
+# This even applies to paths of other files the resource agent uses. 
+# So, for example, setting $FCI_HELPER_BIN allows use of another monitoring script
+#
+# The --ra-output parameter specifies where resource agent output is piped to, 
+# --test-output specifies where test output is piped to.
+#
+# By default, output from the resource agent is suppressed and output from the test goes to the terminal.
+#
+
+usage() {
+	cat<<-EOF
+		fci_test [--ra-output <output from resource agent> --test-output <output from test script> --test-cases "testcase_1 testcase_2"]
+		
+		The default behavior is to run all tests. If any specific test cases are specified only those will be run.
+		Expects resource agent and SQL Server to be installed. To test basic ops, run "fci_test --test-cases run_start_monitor_stop"
+	EOF
+}
+
+MODE="test"
+RA_OUTPUT=/dev/null
+TEST_LOGS=/dev/null
+TEST_OUTPUT=/dev/tty
+ARGS_TEST_CASES=""
+
+OCF_RESOURCE_INSTANCE='fci1'
+OCF_RESKEY_CRM_meta_timeout='30000'
+
+while [[ $# -gt 1 ]]; do
+	case "$1" in
+		--ra-output)
+			RA_OUTPUT="$2"
+			;;
+		--test-output)
+			TEST_OUTPUT="$2"
+			;;
+		--test-log)
+			TEST_LOGS="$2"
+			;;
+		--test-cases)
+			ARGS_TEST_CASES="$2"
+			;;
+		*)
+			usage
+			exit 1
+			;;
+	esac
+	shift 2
+done
+
+if [[ $# -ne 0 ]]; then
+	usage
+	exit 1
+fi
+
+# By default use the resource agent that's installed
+# Override the FCI environment variable to use another
+#
+: ${FCI=/usr/lib/ocf/resource.d/mssql/fci}
+. ${FCI} 
+
+
+printerror() { 
+	echo "$@" &>> $TEST_OUTPUT 
+}
+run_agent() {
+	local output rc
+	"$@" &>> $RA_OUTPUT
+	return $?
+}
+error() {
+	printerror "***Error encountered in ${FUNCNAME[1]} at ${BASH_LINENO[0]}:***"
+	printerror "$@"
+	printerror ""
+}
+log() {
+	echo "$*" &>> $TEST_LOGS
+}
+
+cleanup() {
+	if ! run_agent mssql_stop; then
+		error "mssql_stop failed; cannot cleanup."
+		return 1
+	fi
+}
+
+# expected cases
+# start, monitor, stop, all in order
+run_start_monitor_stop() {
+	local rc
+
+	run_agent mssql_start
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then	
+		error "mssql_start returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	if ! pidof $OCF_RESKEY_binary >/dev/null; then
+		error "Expects $OCF_RESKEY_binary to be running"
+		return 1
+	fi
+
+	run_agent mssql_monitor
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then	
+		error "mssql_monitor returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	run_agent mssql_stop
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then 
+		error "mssql_stop returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+}
+
+# start, monitor, kill SQL Server, monitor again, stop, monitor again
+# after killing SQL Server monitor should return OCF_ERR_GENERIC
+# stop should succeed
+# after running stop monitor should return OCF_NOT_RUNNING
+run_start_monitor_kill_monitor_stop() {
+	local rc pids
+
+	run_agent mssql_start
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then	
+		error "mssql_monitor returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	run_agent mssql_monitor
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then	
+		error "mssql_monitor returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	# kill SQL
+	pids=$(pidof "$OCF_RESKEY_binary")
+	for pid in $pids; do
+		kill "$pid"
+	done
+
+	run_agent mssql_monitor
+	rc=$?
+	if [[ $rc -ne $OCF_ERR_GENERIC ]]; then	
+		error "mssql_monitor returned $rc, expected $OCF_ERR_GENERIC"
+		return 1
+	fi
+
+	# this should succeed
+	run_agent mssql_stop
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then 
+		error "mssql_stop returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	# now monitor should return not_running 
+	run_agent mssql_monitor
+	rc=$? 
+	if [[ $rc != $OCF_NOT_RUNNING ]]; then	
+		error "mssql_monitor returned $rc, expected $OCF_NOT_RUNNING"
+		return 1
+	fi
+}
+
+# running start twice should succeed both times
+run_start_twice() {
+	run_agent mssql_start
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then	
+		error "mssql_start returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	run_agent mssql_start
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then	
+		error "mssql_start returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	if ! pidof $OCF_RESKEY_binary >/dev/null; then
+		error "Expects $OCF_RESKEY_binary to be running"
+		return 1
+	fi
+}
+
+# running stop twice should succeed both times
+run_stop_twice() {
+	run_agent mssql_start
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then	
+		error "mssql_start returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	run_agent mssql_stop
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then	
+		error "mssql_stop returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	run_agent mssql_stop
+	rc=$?
+	if [[ $rc -ne $OCF_SUCCESS ]]; then	
+		error "mssql_stop returned with $rc, expected value: $OCF_SUCCESS"
+		return 1
+	fi
+
+	if pidof $OCF_RESKEY_binary; then
+		error "Expects $OCF_RESKEY_binary not to be running"
+		return 1
+	fi
+}
+
+# Stop operation should succeed even in the middle of a start operation
+# Start operation will probably exit with an error (although we don't really care)
+stop_during_start() {
+	local start_pid
+	local seconds="0.2 0.5 1 3 10"
+
+	for i in $seconds; do
+		run_agent mssql_start &
+		start_pid=$!
+		log "mssql_start started with pid: $start_pid"
+
+		sleep "$i"
+		log "Running mssql_stop"
+		if ! run_agent mssql_stop; then
+			error "Expects mssql_stop to succeed $i seconds after running mssql_start"
+			return 1
+		fi
+
+		wait $start_pid
+		rc=$?
+		log "mssql_start finished with exit code: $rc. Most likely (but not necessarily) will be non-zero."
+
+		if pidof $OCF_RESKEY_binary; then
+			error "Expects no SQL Server processes to be running"
+			return 1
+		fi
+	done
+}
+
+# Stop operation should succeed in the middle of a monitor op
+# Monitor will probably exit with an error (although we don't really care)
+stop_during_monitor() {
+	local seconds="0.2 1 3"
+
+	for i in $seconds; do
+		run_agent mssql_start
+
+		run_agent mssql_monitor &
+		start_pid=$!
+		log "mssql_monitor started with pid: $start_pid"
+
+		sleep $i
+		log "Running mssql_stop"
+		if ! run_agent mssql_stop; then
+			error "Expects mssql_stop to succeed $i seconds after running mssql_start"
+			return 1
+		fi
+
+		wait $start_pid
+		rc=$?
+		log "mssql_monitor finished with exit code: $rc. Most likely (but not necessarily) will be non-zero."
+
+		if pidof $OCF_RESKEY_binary; then
+			error "Expects no SQL Server processes to be running"
+			return 1
+		fi
+	done
+}
+
+# sometimes pacemaker will cancel the monitoring op (by killing the process), and then running "stop"
+# the stop should always succeed
+cancel_monitor() {
+	local seconds="0.2 1 3"
+
+	for i in $seconds; do
+		run_agent mssql_start
+
+		run_agent mssql_monitor &
+		start_pid=$!
+		log "mssql_monitor started with pid: $start_pid"
+
+		sleep $i
+		log "Killing the monitor action:"
+		kill "$start_pid"
+
+		log "Running mssql_stop"	
+		if ! run_agent mssql_stop; then
+			error "Expects mssql_stop to succeed $i seconds after running mssql_monitor"
+			return 1
+		fi
+	done
+
+}
+
+test_cases=(run_start_monitor_stop 
+	run_start_monitor_kill_monitor_stop
+	run_start_twice
+	run_stop_twice
+	stop_during_start
+	stop_during_monitor)
+
+run_test() {
+	local rc
+	if ! type "$1" &>/dev/null; then
+		echo "Test: $1 does not exist"
+	fi
+
+	echo "Running test: \"$1\""
+	cleanup
+	"$1"
+	rc=$?
+	echo "Test: \"$1\" exited with return code: $rc"
+}
+
+if [[ "x$ARGS_TEST_CASES" != "x" ]]; then
+	for i in $ARGS_TEST_CASES; do
+		run_test "$i"
+	done
+else
+	for i in "${test_cases[@]}"; do
+		run_test "$i"
+	done
+fi
