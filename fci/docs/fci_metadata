@@ -1,0 +1,86 @@
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="fci" version="1.0">
+  <version>1.0</version>
+  <longdesc lang="en">
+    Stateless resource agent for a SQL Server Failover Cluster Instance.
+  </longdesc>
+  <shortdesc lang="en">Failover Cluster Instance resource agent.</shortdesc>
+  <parameters>
+    <parameter name="user" unique="0" required="0">
+      <longdesc lang="en">
+        User account under which SQL Server will run.
+      </longdesc>
+      <shortdesc lang="en">SQL Server's user account.</shortdesc>
+      <content type="string" default="mssql"/>
+    </parameter>
+    <parameter name="binary" unique="0" required="0">
+      <longdesc lang="en">Path to the SQL Server binary.</longdesc>
+      <shortdesc lang="en">SQL Server binary</shortdesc>
+      <content type="string" default="/opt/mssql/bin/sqlservr"/>
+    </parameter>
+    <parameter name="mssql_args" unique="0" required="0">
+      <longdesc lang="en">Command line arguments for SQL Server.</longdesc>
+      <shortdesc lang="en">SQL Server arguments</shortdesc>
+      <content type="string" default=""/>
+    </parameter>
+    <parameter name="working_dir" unique="0" required="0">
+      <longdesc lang="en">Working directory for SQL Server.</longdesc>
+      <shortdesc lang="en">Working directory</shortdesc>
+      <content type="string" default="/var/opt/mssql"/>
+    </parameter>
+    <parameter name="status_file" unique="1" required="0">
+      <longdesc lang="en">Status file location. The status is used to determine with SQL Server crashed or was properly stopped by us.</longdesc>
+      <shortdesc lang="en">Status file</shortdesc>
+      <content type="string" default="${HA_VARRUN%%/}/mssql-${OCF_RESOURCE_INSTANCE}.pid"/>
+    </parameter>
+    <parameter name="monitor_policy" unique="0" required="0">
+      <longdesc lang="en">
+        Monitoring policy options are:
+
+        1) SERVER_DOWN: only restart or failover if SQL Server is down (the process is not running)
+        2) SERVER_UNRESPONSIVE: restart or failover if SQL Server is unresponsive (unable to establish a connection)
+        3) SERVER_CRITICAL_ERROR: restart or failover when sp_server_diagnostics detects a critical system error
+        4) SERVER_MODERATE_ERROR: restart or failover when sp_server_diagnostics detects a critical system or resource error
+        5) SERVER_ANY_QUALIFIED_ERROR: restart or failover when sp_server_diagnostics detects any qualified error</longdesc>
+      <shortdesc lang="en">Monitoring policy</shortdesc>
+      <content type="integer" default="3"/>
+    </parameter>
+    <parameter name="monitor_timeout" unique="0" required="0">
+      <longdesc lang="en">Login and query execution timeout for monitoring in seconds.</longdesc>
+      <shortdesc lang="en">Login and query execution timeout for monitoring.</shortdesc>
+      <content type="integer" default="20"/>
+    </parameter>
+    <parameter name="login_retries" unique="0" required="0">
+      <longdesc lang="en">This parameter is unused and only kept for backward-compatibility. Set monitor_timeout instead.</longdesc>
+      <shortdesc lang="en">Unused.</shortdesc>
+      <content type="integer" default="0"/>
+    </parameter>
+    <parameter name="stop_timeout" unique="0" required="0">
+      <longdesc lang="en">
+        Timeout for stopping SQL Server. The resource agent will first attempt to kill SQL Server politely (using a TERM signal). SQL Server will then checkpoint all databases and exit. If the SQL Server process has not exited by the timeout then the resource agent will attempt to forcibly kill it by sending SIGKILL.
+      </longdesc>
+      <shortdesc lang="en">Timeout for stopping the SQL Server process.</shortdesc>
+      <content type="integer" default="10"/>
+    </parameter>
+    <parameter name="monitoring_credentials_file" unique="0" required="0">
+      <longdesc lang="en">
+        Credentials for a SQL Server user the resource agent will log in as to execute a stored procedure to monitor instance health. This file should contain two lines, the first with the username and second with the password.
+      </longdesc>
+      <shortdesc lang="en">Location of file containing a SQL Server user credential the resource agent can use.</shortdesc>
+      <content type="string" default="/var/opt/mssql/secrets/passwd"/>
+    </parameter>
+    <parameter name="port" unique="0" required="0">
+      <longdesc lang="en">Port SQL Server listens on.</longdesc>
+      <shortdesc lang="en">Port</shortdesc>
+      <content type="integer" default="1433"/>
+    </parameter>
+  </parameters>
+  <actions>
+    <action name="start" timeout="1000"/>
+    <action name="stop" timeout="20"/>
+    <action name="monitor" timeout="30" interval="10" depth="0"/>
+    <action name="validate-all" timeout="20"/>
+    <action name="meta-data" timeout="5"/>
+  </actions>
+</resource-agent>

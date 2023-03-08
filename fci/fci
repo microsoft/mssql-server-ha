@@ -1,0 +1,511 @@
+#!/bin/bash
+#
+# Copyright (C) Microsoft Corporation.
+#
+# SQL Server Failover Cluster Instance resource agent
+#
+# Valid actions are:
+#    start
+#    stop
+#    monitor
+#    validate-all
+#    meta-data
+#
+
+# ----------------------------------------------------------------------------------------------------------
+# functions: test_mode
+#
+# Description:
+#    If the env variable MODE == "test", then this file can be sourced for debugging
+#
+test_mode() {
+	[[ "$MODE" = 'test' ]]
+}
+
+# ----------------------------------------------------------------------------------------------------------
+#
+if test_mode; then
+	: "${OCF_ROOT=/usr/lib/ocf}"
+fi
+
+# Subtract this from the exit code of ag-helper to get the OCF exit code.
+# This is the inverse of the operation performed by `mssqlcommon.OcfExit` used by ag-helper.
+OCF_EXIT_DIFFERENCE=10
+
+# ----------------------------------------------------------------------------------------------------------
+# Pacemaker libraries
+#
+: "${OCF_FUNCTIONS=${OCF_ROOT}/resource.d/heartbeat/.ocf-shellfuncs}"
+. "$OCF_FUNCTIONS"
+: "${__OCF_ACTION=$1}"
+
+# ----------------------------------------------------------------------------------------------------------
+# Location of other files used by this resource agent
+#
+: "${FCI_HELPER_BIN=${OCF_ROOT}/lib/mssql/fci-helper}"
+: "${METADATA_FILE=${OCF_ROOT}/lib/mssql/fci_metadata}"
+: "${MSSQL_RA_USAGE_FILE=${OCF_ROOT}/lib/mssql/fci_usage}"
+
+# ----------------------------------------------------------------------------------------------------------
+# Defaults values for optional parameters
+#
+: "${WORKING_DIR_DEFAULT=/var/opt/mssql}"
+: "${MONITOR_LEVEL_DEFAULT=3}"
+: "${MONITOR_TIMEOUT_DEFAULT=20}"
+: "${MONITORING_CREDENTIALS_FILE_DEFAULT=${WORKING_DIR_DEFAULT}/secrets/passwd}"
+: "${PORT_DEFAULT=1433}"
+: "${INSTANCE_FILE_DEFAULT=${HA_VARRUN%%/}/mssql-${OCF_RESOURCE_INSTANCE}.pid}"
+: "${BINARY_DEFAULT=/opt/mssql/bin/sqlservr}"
+: "${USER_DEFAULT=mssql}"
+: "${STOP_TIMEOUT_DEFAULT=19}"
+: "${MSSQL_ARGS_DEFAULT=""}"
+
+# ----------------------------------------------------------------------------------------------------------
+# function: mssql_meta_data
+#
+# Description:
+#    Implements the OCF "meta-data" action.
+#
+mssql_meta_data() {
+	cat "$METADATA_FILE"
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# function: usage
+#
+mssql_usage() {
+	cat "$MSSQL_RA_USAGE_FILE"
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# function: mssql_start_process
+#
+# Description:
+#    Starts SQL Server as user $OCF_RESKEY_user in $OCF_RESKEY_working_dir with args $OCF_RESKEY_mssql_args.
+#    Prints out the pid of the SQL Server process.
+#
+# Returns:
+#    Result code from the su -c command used to start SQL Server.
+#
+mssql_start_process() {
+	local pid
+
+	# go to working directory we will run sql from
+	#
+	pushd "$OCF_RESKEY_working_dir"
+
+	mssql_start_command="$OCF_RESKEY_binary $OCF_RESKEY_mssql_args"
+
+	# su - -s /bin/bash "$OCF_RESKEY_user": run bash as configured user
+	# -c: execute command and exit bash
+	# $mssql_start_command >/dev/null 2>&1: run SQL Server in background, closing stdin and stdout
+	# echo $!: print out the PID of the new SQL Server process
+	#
+	pid="$(su - -s /bin/bash "$OCF_RESKEY_user" -c "$mssql_start_command >/dev/null 2>&1 & echo \$!")"
+	rc="$?"
+
+	ocf_log info "SQL Server started. PID: $pid; user: $OCF_RESKEY_user; command: $mssql_start_command"
+
+	# leave $OCF_RESKEY_working_dir
+	#
+	popd
+
+	return "$rc"
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# function: mssql_start
+#
+# Description:
+#    Implements the OCF "start" action.
+#    Starts the SQL Server process and waits until recovery completes (we can log in and execute a query).
+#    Creates the empty file: $OCF_RESKEY_status_file
+#
+# Returns:
+#    OCF_SUCCESS: SQL Server successfully started or was already running
+#    OCF_ERR_ARGS: User account or working directory don't exist, or starting SQL Server failed
+#    OCF_ERR_PERM: We were completely unable to start the SQL Server process.
+#    OCF_ERR_GENERIC: The SQL Server process crashed during startup.
+#
+mssql_start() {
+	local rc
+	ocf_log info 'mssql_start'
+
+	# Check if the SQL Server process is already running.
+	#
+	if pid="$(get_processes)"; then
+		ocf_exit_reason "SQL Server processes already running with pids: $pid."
+		return "$OCF_SUCCESS"
+	fi
+
+	# Ensure that the working directory exists
+	#
+	if [[ ! -d "$OCF_RESKEY_working_dir" ]]; then
+		ocf_exit_reason "Working directory doesn't exist: $OCF_RESKEY_working_dir"
+		return "$OCF_ERR_ARGS"
+	fi
+
+	# Check that the user to run SQL Server as exists
+	#
+	if ! id "$OCF_RESKEY_user" >/dev/null; then
+		ocf_exit_reason "Invalid user: $OCF_RESKEY_user"
+		return "$OCF_ERR_ARGS"
+	fi
+
+	# Start the SQL Server process
+	#
+	if ! pid="$(mssql_start_process)"; then
+		# We get here if a problem was encountered while starting the process itself.
+		# This is probably not a transient error.
+		return "$OCF_ERR_PERM"
+	fi
+
+	# Logins will fail until recovery completes.
+	# Retry in an infinite loop until we get a login.
+	#
+	while :; do
+		sleep 1
+
+		# Recognize that the SQL Server process crashed and exit the loop
+		#
+		if ! get_processes; then
+			ocf_exit_reason 'SQL Server crashed during startup.'
+			return "$OCF_ERR_GENERIC"
+		fi
+
+		local command_output
+		local rc
+
+		command_output="$(
+			"$FCI_HELPER_BIN" \
+				--port "$OCF_RESKEY_port" \
+				--credentials-file "$OCF_RESKEY_monitoring_credentials_file" \
+				--application-name "monitor-$OCF_RESOURCE_INSTANCE-start" \
+				--connection-timeout "$OCF_RESKEY_monitor_timeout" \
+				--health-threshold "$OCF_RESKEY_monitor_policy" \
+				--action start \
+				--virtual-server-name "$OCF_RESOURCE_INSTANCE" \
+				2>&1 |
+				while read -r line; do
+					ocf_log info "start: $line"
+					echo "$line"
+				done
+			exit "${PIPESTATUS[0]}"
+		)"
+		rc="$?"
+
+		set_exit_reason "$command_output"
+
+		if (( rc < OCF_EXIT_DIFFERENCE )); then
+			# fci-helper failed in an unexpected way
+			#
+			return "$OCF_ERR_GENERIC"
+		fi
+
+		rc="$(( rc - OCF_EXIT_DIFFERENCE ))"
+
+		case "$rc" in
+			"$OCF_SUCCESS")
+				mark_started
+
+				return "$OCF_SUCCESS"
+				;;
+			"$OCF_ERR_GENERIC")
+				# Retry
+				;;
+			*)
+				# Unexpected error
+				return "$rc"
+				;;
+		esac
+
+	done
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# function: mssql_stop
+#
+# Description:
+#    Implements the ocf "stop" action
+#    Calls "ocf_stop_processes"
+#    Removes the file: $OCF_RESKEY_status_file
+#
+# Returns:
+#    OCF_SUCCESS: SQL Server process exited (or it was already stopped)
+#    OCF_ERR_GENERIC: Even after SIGKILL, SQL Server refused to die
+#
+mssql_stop() {
+	ocf_log info 'mssql_stop'
+
+	# Delete the file we created when starting SQL Server so future invocations of the resource agent know
+	# that SQL Server was stopped from pacemaker.
+	#
+	mark_stopped
+
+	local rc processes stop_timeout
+
+	if ! processes="$(get_processes)"; then
+		ocf_exit_reason 'SQL Server is not running.'
+		return "$OCF_SUCCESS"
+	fi
+
+	# ocf_stop_process will first send a "TERM" signal, wait (stop_timeout / 2) seconds for SQL to exit.
+	# If it hasn't, then it will send a KILL signal and wait another (stop_timeout) / 2 seconds.
+	#
+	stop_timeout="$OCF_RESKEY_stop_timeout"
+	processes="$(get_processes)"
+	ocf_log info "Attempting to stop SQL Server processes with pids: $processes and timeout $stop_timeout"
+
+	ocf_stop_processes 'TERM KILL' "$stop_timeout" "$processes"
+
+	# SQL Server wouldn't die
+	#
+	if get_processes; then
+		ocf_exit_reason 'SQL Server is still running.'
+		return "$OCF_ERR_GENERIC"
+	fi
+
+	return "$OCF_SUCCESS"
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# function: mssql_monitor
+#
+# Description:
+#    Implements the ocf "monitor" action
+#    1. Checks if the SQL Server process is running.
+#    2. Calls the "fci-helper" binary to monitor the instance health and determine whether a failover or restart is necessary
+#
+# Returns:
+#    OCF_SUCCESS: SQL Server process is running, healthier than the user specified failover threshold
+#    OCF_ERR_GENERIC: SQL Server is not running and pacemaker didn't stop it, SQL Server is unresponsive,
+#        or SQL Server is less healthy than user specified failover or restart threshold.
+#    OCF_NOT_RUNNING: SQL Server process is not running and pacemaker stopped it.
+#
+mssql_monitor() {
+	ocf_log info 'mssql_monitor'
+
+	if (( OCF_RESKEY_CRM_meta_timeout / 1000 <= OCF_RESKEY_monitor_timeout )); then
+		ocf_exit_reason "The monitor action should have a higher timeout than the 'monitor_timeout' resource option"
+		return "$OCF_ERR_CONFIGURED"
+	fi
+
+	if ! get_processes; then
+		# If we did not stop SQL Server (mssql_stop removes calls mark_stopped)
+		#
+		if is_marked_started; then
+			ocf_exit_reason 'SQL Server process crashed.'
+			return "$OCF_ERR_GENERIC"
+		fi
+
+		return "$OCF_NOT_RUNNING"
+	fi
+
+	if ! is_marked_started; then
+		mark_started
+	fi
+
+	# SQL Server is running. Monitor it.
+	#
+	local command_output
+	local rc
+
+	command_output="$(
+		"$FCI_HELPER_BIN" \
+			--port "$OCF_RESKEY_port" \
+			--credentials-file "$OCF_RESKEY_monitoring_credentials_file" \
+			--application-name "monitor-$OCF_RESOURCE_INSTANCE-monitor" \
+			--connection-timeout "$OCF_RESKEY_monitor_timeout" \
+			--health-threshold "$OCF_RESKEY_monitor_policy" \
+			--action monitor \
+			--virtual-server-name "$OCF_RESOURCE_INSTANCE" \
+			2>&1 |
+			while read -r line; do
+				ocf_log info "monitor: $line"
+				echo "$line"
+			done
+		exit "${PIPESTATUS[0]}"
+	)"
+	rc="$?"
+
+	set_exit_reason "$command_output"
+
+	if (( rc < OCF_EXIT_DIFFERENCE )); then
+		# fci-helper failed in an unexpected way
+		#
+		return "$OCF_ERR_GENERIC"
+	fi
+
+	rc="$(( rc - OCF_EXIT_DIFFERENCE ))"
+
+	return "$rc"
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# function: mssql_validate
+#
+# Description:
+#    Implements the ocf "validate-all" action
+#
+# Returns:
+#    OCF_SUCCESS: all required parameters are set, binaries and credentials file are present
+#    OCF_NOT_INSTALLED: sqlservr or fci-helper binaries are missing
+#    OCF_ERR_ARGS: credentials file is missing
+#
+mssql_validate() {
+	ocf_log info 'mssql_validate'
+
+	# Set default parameters
+	#
+	: "${OCF_RESKEY_status_file_path=$INSTANCE_FILE_DEFAULT}"
+	: "${OCF_RESKEY_binary=$BINARY_DEFAULT}"
+	: "${OCF_RESKEY_working_dir=$WORKING_DIR_DEFAULT}"
+	: "${OCF_RESKEY_user=$USER_DEFAULT}"
+	: "${OCF_RESKEY_monitoring_credentials_file=$MONITORING_CREDENTIALS_FILE_DEFAULT}"
+	: "${OCF_RESKEY_stop_timeout=$STOP_TIMEOUT_DEFAULT}"
+	: "${OCF_RESKEY_mssql_args=$MSSQL_ARGS_DEFAULT}"
+	: "${OCF_RESKEY_monitor_policy=$MONITOR_LEVEL_DEFAULT}"
+	: "${OCF_RESKEY_monitor_timeout=$MONITOR_TIMEOUT_DEFAULT}"
+	: "${OCF_RESKEY_port=$PORT_DEFAULT}"
+
+	# Check binaries necessary for the resource agent to run exit
+	#
+	check_binary "$OCF_RESKEY_binary"
+	check_binary "$FCI_HELPER_BIN"
+
+	# Check that we have file with username / password for monitoring login
+	#
+	if [[ ! -f "$OCF_RESKEY_monitoring_credentials_file" ]]; then
+		ocf_exit_reason "Expect credentials file at $OCF_RESKEY_monitoring_credentials_file"
+		if ocf_is_probe; then
+			# This is a probe. The credentials file might be on shared storage, so don't return a hard error
+			if get_processes; then
+				# Credentials file isn't found but sqlservr is running somehow.
+				return "$OCF_ERR_GENERIC"
+			else
+				# Ignore the fact that the credentials file is missing.
+				return "$OCF_NOT_RUNNING"
+			fi
+		else
+			return "$OCF_ERR_ARGS"
+		fi
+	fi
+
+	# check required parameters (there are none for now)
+
+	return "$OCF_SUCCESS"
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# function: get_processes
+#
+# Description:
+#    Gets SQL Server processes using "pidof." This is safe since we expected OCF_RESKEY_binary
+#        is the absolute path to the SQL Server binary and we only have one instance running.
+#
+#
+get_processes() {
+	pidof "$OCF_RESKEY_binary"
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# functions: mark_started, mark_stopped, is_marked_started
+#
+# Description:
+#    mark_started creates an empty file at OCF_RESKEY_status_file_path (which is by default /var/run/mssql-<INSTANCE_NAME>).
+#    mark_stopped removes this file
+#    is_marked_started checks for the existence of this file
+#    This is used to determine whether SQL Server crashed or was started and stopped by pacemaker
+#
+mark_started() {
+	touch "$OCF_RESKEY_status_file_path"
+}
+
+mark_stopped() {
+	rm -f "$OCF_RESKEY_status_file_path"
+}
+
+is_marked_started() {
+	[[ -f "$OCF_RESKEY_status_file_path" ]]
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# function: mssql_export_ocf_exit_codes
+#
+# Description:
+#    Exports the OCF exit code variables as environment variables for sub-processes.
+#
+mssql_export_ocf_exit_codes() {
+	export \
+		OCF_ERR_ARGS OCF_ERR_CONFIGURED OCF_ERR_GENERIC OCF_ERR_PERM OCF_ERR_UNIMPLEMENTED \
+		OCF_FAILED_MASTER OCF_NOT_RUNNING \
+		OCF_RUNNING_MASTER OCF_SUCCESS
+}
+
+# ----------------------------------------------------------------------------------------------------------
+# function: set_exit_reason
+#
+# Description:
+#    Extracts the exit reason from the given command output if it exists, and sets it.
+#
+set_exit_reason() {
+	local exit_reason="$(echo "$1" | grep -Po '^ERROR: \K.*' | head -n1)"
+	if [[ -n "$exit_reason" ]]; then
+		ocf_exit_reason "$exit_reason"
+	fi
+}
+
+# ----------------------------------------------------------------------------------------------------------
+#
+if [[ "$__OCF_ACTION" = 'meta-data' ]]; then
+	mssql_meta_data
+	exit "$OCF_SUCCESS"
+fi
+
+mssql_validate
+validate_result="$?"
+
+if ! test_mode; then
+	ocf_log info "Resource agent invoked with: $__OCF_ACTION"
+
+	# If validation failed, then return that failure unless the action is stop.
+	# Stop should always try to stop sqlservr.
+	if [ "$validate_result" -ne 0 -a "$__OCF_ACTION" != 'stop' ]; then
+		exit "$validate_result"
+	fi
+fi
+
+mssql_export_ocf_exit_codes
+
+case "$__OCF_ACTION" in
+	'start')
+		mssql_start
+		;;
+	'stop')
+		mssql_stop
+		;;
+	'monitor')
+		mssql_monitor
+		;;
+	'validate-all')
+		exit "$validate_result"
+		;;
+	'usage' | 'help')
+		mssql_usage
+		exit "$OCF_SUCCESS"
+		;;
+	*)
+		# We can source this file for testing, in which case we don't want to exit
+		#
+		if ! test_mode; then
+			mssql_usage
+			exit "$OCF_ERR_UNIMPLEMENTED"
+		fi
+		;;
+esac
+rc="$?"
+
+if ! test_mode; then
+	ocf_log info "${OCF_RESOURCE_INSTANCE} $__OCF_ACTION : $rc"
+	exit "$rc"
+fi
