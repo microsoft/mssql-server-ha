@@ -20,6 +20,15 @@ The agent can be installed by moving the files to these locations:
 The shell script is the entry point for the resource agent and delegates to the helper binary for most tasks. The helper binary monitors the instance health by running `sp_server_diagnostics` and the AG health by querying `sys.databases`. It also implements the promote and demote actions by running the `ALTER AVAILABILITY GROUP FAILOVER` and `ALTER AVAILABILITY GROUP SET (ROLE = SECONDARY)` DDLs.
 
 
+Major changes since SQL2017:
+
+- Provide hostname support for ag and fci
+- Install External Lease in Pacemaker 
+- Introduce external write lease handling to Pacemaker AG resource agent
+- Not to wait for databases to come online during failover
+- Bring secondaries offline in post promote
+- Various Pacemaker AG agent fixes for more reliable failovers
+
 # Failover Cluster Instance resource agent `ocf:mssql:fci`
 
 This is made up of a golang binary `go/src/fci-helper` and a shell script `fci/fci`. `fci-helper` can be built by running `GOPATH=$PWD/go go install fci-helper`
@@ -31,6 +40,12 @@ The agent can be installed by moving the files to these locations:
 - `go/bin/fci-helper` to `/usr/lib/ocf/lib/mssql/fci-helper`
 
 The shell script is the entry point for the resource agent and handles starting and stopping the `sqlservr` process. The script invokes the `fci-helper` binary to fixup the server name after starting the resource (if necessary), and to monitor the instance health by running `sp_server_diagnostics`
+
+
+Major changes since SQL2017:
+
+- Ensure ag-helper and fci-helper exit if the resource agent process is killed
+- ag helper will reattempt connection if connection times out for monitor action
 
 
 # License
