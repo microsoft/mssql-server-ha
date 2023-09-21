@@ -91,7 +91,10 @@ mssql_start() {
 		return "$OCF_ERR_GENERIC"
 	fi
 
-	local current_master="$(crm_resource -r "$OCF_RESOURCE_INSTANCE" --locate | grep -Po 'resource [^ ]+ is running on: \K(.+)(?= Master$)')"
+	# RHEL9 introduces a breaking change about crm_resource cmd return value from "Master" to "Promoted". 
+	# We need to change grep pip condition accordingly so our agent code supports both old and new pacemaker version.
+	local current_master="$(crm_resource -r "$OCF_RESOURCE_INSTANCE" --locate | grep -Po 'resource [^ ]+ is running on: \K(.+)(?= (Master|Promoted)$)')"
+	ocf_log info "mssql_start current_master: $current_master"
 
 	command_output="$(
 		"$AG_HELPER_BIN" \
@@ -298,7 +301,10 @@ mssql_monitor() {
 		ocf_log info "WARNING: Monitor timeout is lower than connection timeout. Connection will not retried if connection timeout occurs"
 	fi	
 
-	local current_master="$(crm_resource -r "$OCF_RESOURCE_INSTANCE" --locate | grep -Po 'resource [^ ]+ is running on: \K(.+)(?= Master$)')"
+	# RHEL9 introduces a breaking change about crm_resource cmd return value from "Master" to "Promoted". 
+	# We need to change grep pip condition accordingly so our agent code supports both old and new pacemaker version.
+	local current_master="$(crm_resource -r "$OCF_RESOURCE_INSTANCE" --locate | grep -Po 'resource [^ ]+ is running on: \K(.+)(?= (Master|Promoted)$)')"
+	ocf_log info "mssql_monitor current_master: $current_master"
 
 	command_output="$(
 		"$AG_HELPER_BIN" \
